@@ -8,7 +8,7 @@ from neural_decoder import *
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset', type=str, default='mnist', metavar='str',
                     help='dataset name from [mnist, shapenet, watermarking, watermarking] (default: mnist)')
-parser.add_argument('--batch_size', type=int, default=16, metavar='N',
+parser.add_argument('--batch_size', type=int, default=32, metavar='N',
                     help='input batch size for training (default: 2)')
 parser.add_argument('--net_G', type=str, default='unet_256', metavar='str',
                     help='net_G: resnet18fcn or resnet50fcn or unet_64 or unet_128 or unet_256 (default: resnet18)')
@@ -48,5 +48,3 @@ if __name__ == '__main__':
     dataloaders = datasets.get_loaders(args)
     nn_decoder = Decoder(args=args, dataloaders=dataloaders)
     nn_decoder.train_models()
-
-
