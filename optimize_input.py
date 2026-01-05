@@ -8,6 +8,8 @@ import matplotlib.pyplot as plt
 
 import datasets
 from networks import define_G 
+import torch.nn.functional as F
+
 
 # -----------------------
 # Utils
@@ -58,9 +60,43 @@ def save_vis(out_dir, step, x_img, pred, gt):
 
 def load_checkpoint(net_G, ckpt_path, device):
     ckpt = torch.load(ckpt_path, map_location=device)
-    # 你的 ckpt 里 key 是 model_G_state_dict
     net_G.load_state_dict(ckpt["model_G_state_dict"], strict=True)
     return ckpt
+
+
+def save_vis_compare(out_dir, step, x_img, pred_main, pred_alt, gt):
+    os.makedirs(out_dir, exist_ok=True)
+
+    x = x_img.detach().cpu().clamp(0, 1)[0].permute(1, 2, 0).numpy()  # HWC
+    p1 = pred_main.detach().cpu()[0, 0].numpy()
+    p2 = pred_alt.detach().cpu()[0, 0].numpy()
+    g  = gt.detach().cpu()[0, 0].numpy()
+
+    def norm01(a):
+        a = a.astype(np.float32)
+        mn, mx = np.min(a), np.max(a)
+        if mx - mn < 1e-8:
+            return np.zeros_like(a)
+        return (a - mn) / (mx - mn)
+
+    p1v, p2v, gv = norm01(p1), norm01(p2), norm01(g)
+
+    fig = plt.figure(figsize=(8, 10))
+    ax1 = fig.add_subplot(4, 1, 1)
+    ax1.imshow(x); ax1.set_title("Learnable input"); ax1.axis("off")
+
+    ax2 = fig.add_subplot(4, 1, 2)
+    ax2.imshow(p1v, cmap="gray"); ax2.set_title("Pred (main)"); ax2.axis("off")
+
+    ax3 = fig.add_subplot(4, 1, 3)
+    ax3.imshow(p2v, cmap="gray"); ax3.set_title("Pred (alt)"); ax3.axis("off")
+
+    ax4 = fig.add_subplot(4, 1, 4)
+    ax4.imshow(gv, cmap="gray"); ax4.set_title("GT"); ax4.axis("off")
+
+    fig.tight_layout()
+    fig.savefig(os.path.join(out_dir, f"compare_step_{step:06d}.png"), dpi=150)
+    plt.close(fig)
 
 
 # -----------------------
@@ -94,6 +130,19 @@ def main():
     # whether to start from the real stereogram (gt input) or from noise
     parser.add_argument("--init", type=str, default="gt", choices=["gt", "noise"])
 
+    # ---- optional: evaluate another architecture during optimization ----
+    parser.add_argument("--alt_net_G", type=str, default="",
+                        help="if set, build another G (e.g., unet_256 / resnet18fcn / vit_b_16_fcn) for comparison")
+    parser.add_argument("--alt_in_size", type=int, default=None,
+                        help="input size used to build and evaluate alt model (e.g., 128/256). "
+                        "If None, use --in_size.")
+    parser.add_argument("--alt_checkpoint_path", type=str, default="",
+                        help="checkpoint for alt_net_G")
+    parser.add_argument("--alt_norm_type", type=str, default="batch")
+    parser.add_argument("--alt_with_disparity_conv", action="store_true", default=False)
+    parser.add_argument("--alt_with_skip_connection", action="store_true", default=False)
+
+
     args = parser.parse_args()
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -113,6 +162,30 @@ def main():
     net_G.eval()
     for p in net_G.parameters():
         p.requires_grad_(False)
+
+    # 2.5) (optional) build & load an alternative G for comparison
+    net_G_alt = None
+    if args.alt_net_G and args.alt_checkpoint_path:
+        class AltArgs:
+            pass
+        alt_args = AltArgs()
+        alt_args.dataset = args.dataset
+        alt_args.batch_size = args.batch_size if hasattr(args, "batch_size") else 1
+        alt_args.net_G = args.alt_net_G
+        alt_args.norm_type = args.alt_norm_type
+        alt_args.with_disparity_conv = args.alt_with_disparity_conv
+        alt_args.with_skip_connection = args.alt_with_skip_connection
+        alt_args.in_size = args.alt_in_size if args.alt_in_size is not None else args.in_size
+
+
+        net_G_alt = define_G(alt_args).to(device)
+        _ = load_checkpoint(net_G_alt, args.alt_checkpoint_path, device)
+        net_G_alt.eval()
+        for p in net_G_alt.parameters():
+            p.requires_grad_(False)
+
+        print(f"[ALT] Loaded alt model: {args.alt_net_G} from {args.alt_checkpoint_path}")
+
 
     # 3) create learnable input
     if args.init == "gt":
@@ -163,10 +236,48 @@ def main():
         if step % 10 == 0 or step == 1:
             print(f"[step {step:05d}/{args.steps}] loss={loss.item():.6f}")
 
+
         if step % args.vis_every == 0 or step == args.steps:
             with torch.no_grad():
-                pred_vis = net_G(x_param.clamp(0.0, 1.0))
-            save_vis(args.out_dir, step=step, x_img=x_param.clamp(0, 1), pred=pred_vis, gt=gt_depth)
+                x_vis = x_param.clamp(0.0, 1.0)
+                pred_main = net_G(x_vis)
+
+                # main visualization (keep your old one if you like)
+                save_vis(args.out_dir, step=step, x_img=x_vis, pred=pred_main, gt=gt_depth)
+
+                if net_G_alt is not None:
+                    alt_size = args.alt_in_size if args.alt_in_size is not None else args.in_size
+
+                    # resize input stereogram for alt model
+                    if x_vis.shape[-1] != alt_size:
+                        x_alt = F.interpolate(x_vis, size=(alt_size, alt_size),
+                                            mode="bilinear", align_corners=False)
+                    else:
+                        x_alt = x_vis
+
+                    # resize gt depth for alt comparison
+                    if gt_depth.shape[-1] != alt_size:
+                        gt_alt = F.interpolate(gt_depth, size=(alt_size, alt_size),
+                                            mode="bilinear", align_corners=False)
+                    else:
+                        gt_alt = gt_depth
+
+                    pred_alt = net_G_alt(x_alt)
+
+                    loss_alt = loss_fn(pred_alt, gt_alt).item()
+                    loss_main = loss_fn(pred_main, gt_depth).item()
+
+                    print(f"[VIS {step:05d}] main(MSE@{args.in_size})={loss_main:.6f} | "
+                        f"alt(MSE@{alt_size})={loss_alt:.6f}")
+
+                    save_vis_compare(args.out_dir, step=step,
+                                    x_img=x_vis, pred_main=pred_main,
+                                    pred_alt=F.interpolate(pred_alt, size=(args.in_size, args.in_size),
+                                                            mode="bilinear", align_corners=False)
+                                            if alt_size != args.in_size else pred_alt,
+                                    gt=gt_depth)
+
+
 
     # save final learned input tensor
     torch.save(
