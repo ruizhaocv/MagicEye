@@ -99,6 +99,79 @@ def save_vis_compare(out_dir, step, x_img, pred_main, pred_alt, gt):
     plt.close(fig)
 
 
+def gaussian_blur_2d(x, sigma=1.0, kernel_size=5):
+    # x: [B,C,H,W]  depthwise conv, differentiable
+    if kernel_size % 2 == 0:
+        kernel_size += 1
+    device = x.device
+    coords = torch.arange(kernel_size, device=device) - kernel_size // 2
+    g = torch.exp(-(coords**2) / (2 * sigma**2))
+    g = g / g.sum()
+    k2d = (g[:, None] * g[None, :]).float()  # [K,K]
+    k2d = k2d[None, None, :, :]              # [1,1,K,K]
+    k2d = k2d.repeat(x.shape[1], 1, 1, 1)    # [C,1,K,K]
+    return F.conv2d(x, k2d, padding=kernel_size // 2, groups=x.shape[1])
+
+def eot_transform(x, out_size, args):
+    """
+    x: [B,C,H,W] in [0,1] roughly
+    out_size: int, usually args.in_size
+    returns: transformed x with same size
+    """
+    B, C, H, W = x.shape
+    assert H == out_size and W == out_size
+
+    # 1) additive noise
+    if args.eot_noise_std > 0:
+        x = x + args.eot_noise_std * torch.randn_like(x)
+
+    # 2) brightness/contrast jitter (differentiable)
+    if args.eot_brightness > 0:
+        b = (torch.rand(B, 1, 1, 1, device=x.device) * 2 - 1) * args.eot_brightness
+        x = x + b
+    if args.eot_contrast > 0:
+        c = 1.0 + (torch.rand(B, 1, 1, 1, device=x.device) * 2 - 1) * args.eot_contrast
+        mean = x.mean(dim=(2, 3), keepdim=True)
+        x = (x - mean) * c + mean
+
+    # clamp after photometric
+    x = x.clamp(0.0, 1.0)
+
+    # 3) random scale then resize back
+    if args.eot_scale > 0:
+        s = 1.0 + (torch.rand(1, device=x.device) * 2 - 1) * args.eot_scale
+        new_size = int(round(out_size * float(s.item())))
+        new_size = max(8, new_size)
+
+        x_scaled = F.interpolate(x, size=(new_size, new_size), mode="bilinear", align_corners=False)
+
+        # center crop or pad back to out_size (differentiable)
+        if new_size > out_size:
+            # crop
+            start = (new_size - out_size) // 2
+            x = x_scaled[:, :, start:start+out_size, start:start+out_size]
+        elif new_size < out_size:
+            # pad
+            pad_total = out_size - new_size
+            pad_left = pad_total // 2
+            pad_right = pad_total - pad_left
+            x = F.pad(x_scaled, (pad_left, pad_right, pad_left, pad_right), mode="reflect")
+        else:
+            x = x_scaled
+
+    # 4) random integer shift using roll (differentiable)
+    if args.eot_shift > 0:
+        dx = int(torch.randint(-args.eot_shift, args.eot_shift + 1, (1,), device=x.device).item())
+        dy = int(torch.randint(-args.eot_shift, args.eot_shift + 1, (1,), device=x.device).item())
+        x = torch.roll(x, shifts=(dy, dx), dims=(2, 3))
+
+    # 5) optional blur
+    if args.eot_blur:
+        x = gaussian_blur_2d(x, sigma=1.0, kernel_size=5)
+
+    return x.clamp(0.0, 1.0)
+
+
 # -----------------------
 # Main
 # -----------------------
@@ -143,6 +216,14 @@ def main():
     parser.add_argument("--alt_norm_type", type=str, default="batch")
     parser.add_argument("--alt_with_disparity_conv", action="store_true", default=False)
     parser.add_argument("--alt_with_skip_connection", action="store_true", default=False)
+
+    parser.add_argument("--eot_samples", type=int, default=4, help="number of random transforms per step")
+    parser.add_argument("--eot_noise_std", type=float, default=0.01, help="std of additive gaussian noise")
+    parser.add_argument("--eot_brightness", type=float, default=0.05, help="brightness jitter strength")
+    parser.add_argument("--eot_contrast", type=float, default=0.05, help="contrast jitter strength")
+    parser.add_argument("--eot_scale", type=float, default=0.10, help="random scale jitter in [1-s, 1+s]")
+    parser.add_argument("--eot_shift", type=int, default=4, help="random pixel shift (roll) up to +/- this value")
+    parser.add_argument("--eot_blur", action="store_true", default=False, help="enable small gaussian blur")
 
 
     args = parser.parse_args()
@@ -221,19 +302,27 @@ def main():
     save_vis(args.out_dir, step=0, x_img=gt_stereo, pred=net_G(gt_stereo), gt=gt_depth)
 
     for step in range(1, args.steps + 1):
+        
         opt.zero_grad(set_to_none=True)
 
-        # clamp only for forward (保持可训练同时避免值爆掉)
-        x_in = x_param.clamp(0.0, 1.0)
+        # base input (learnable), keep it in a reasonable range for stability
+        x_base = x_param.clamp(0.0, 1.0)
 
-        pred = net_G(x_in)
-        loss = loss_fn(pred, gt_depth)
+        loss_accum = 0.0
+        for _ in range(args.eot_samples):
+            x_aug = eot_transform(x_base, out_size=args.in_size, args=args)  # transformed input
+            pred = net_G(x_aug)
+            loss_accum = loss_accum + loss_fn(pred, gt_depth)
 
+        loss = loss_accum / float(args.eot_samples)
+
+        # (optional) keep your tv reg here if you use it
         if args.lambda_tv > 0:
-            loss = loss + args.lambda_tv * tv_loss(x_in)
+            loss = loss + args.lambda_tv * tv_loss(x_base)
 
         loss.backward()
         opt.step()
+
 
         if step % 10 == 0 or step == 1:
             print(f"[step {step:05d}/{args.steps}] loss={loss.item():.6f}")
