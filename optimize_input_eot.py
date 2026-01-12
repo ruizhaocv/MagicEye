@@ -22,6 +22,29 @@ def norm01_img(a):
     return (a - mn) / (mx - mn)
 
 
+def norm01(a):
+    a = a.astype(np.float32)
+    mn, mx = np.min(a), np.max(a)
+    if mx - mn < 1e-8:
+        return np.zeros_like(a)
+    return (a - mn) / (mx - mn)
+
+
+def vis_standardize_img(x, eps=1e-6, clip=1.0):
+    # x: HWC, float
+    x = x.astype(np.float32)
+
+    m = x.mean(axis=(0,1), keepdims=True)
+    s = x.std(axis=(0,1), keepdims=True) + eps
+    # m,s =0, 1
+    z = (x - m) / s
+
+    z = np.clip(z, -clip, clip)    # 截断极端值
+    z = (z + clip) / (2 * clip)  # [-clip, clip] -> [0,1]
+
+    return z
+
+
 def save_vis(out_dir, step, x_img, pred, gt):
     """
     x_img: [1,3,H,W] in [0,1]
@@ -29,24 +52,13 @@ def save_vis(out_dir, step, x_img, pred, gt):
     """
     os.makedirs(out_dir, exist_ok=True)
 
-    # x = x_img.detach().cpu().clamp(0, 1)[0].permute(1, 2, 0).numpy()  # HWC
-    # x = x_img.detach().cpu()[0].permute(1, 2, 0).numpy()  # HWC
-
-    x = norm01_img(
-        x_img.detach().cpu()[0].permute(1, 2, 0).numpy()
-    )
+    x_raw = x_img.detach().cpu()[0].permute(1,2,0).numpy()
+    x = vis_standardize_img(x_raw)
 
     p = pred.detach().cpu()[0, 0].numpy()
     g = gt.detach().cpu()[0, 0].numpy()
 
     # normalize pred/gt for visualization only
-    def norm01(a):
-        a = a.astype(np.float32)
-        mn, mx = np.min(a), np.max(a)
-        if mx - mn < 1e-8:
-            return np.zeros_like(a)
-        return (a - mn) / (mx - mn)
-
     p_vis = norm01(p)
     g_vis = norm01(g)
 
@@ -81,7 +93,9 @@ def load_checkpoint(net_G, ckpt_path, device):
 def save_vis_compare(out_dir, step, x_img, pred_main, pred_alt, gt):
     os.makedirs(out_dir, exist_ok=True)
 
-    x = x_img.detach().cpu().clamp(0, 1)[0].permute(1, 2, 0).numpy()  # HWC
+    x_raw = x_img.detach().cpu()[0].permute(1,2,0).numpy()
+    x = vis_standardize_img(x_raw)
+    
     p1 = pred_main.detach().cpu()[0, 0].numpy()
     p2 = pred_alt.detach().cpu()[0, 0].numpy()
     g  = gt.detach().cpu()[0, 0].numpy()
@@ -183,7 +197,7 @@ def eot_transform(x, out_size, args):
     if args.eot_blur:
         x = gaussian_blur_2d(x, sigma=5, kernel_size=11)
 
-    return x #.clamp(0.0, 1.0)
+    return x.clamp(0.0, 1.0)
 
 
 # -----------------------
@@ -320,8 +334,9 @@ def main():
         opt.zero_grad(set_to_none=True)
 
         # base input (learnable), keep it in a reasonable range for stability
-        x_base = x_param #.clamp(0.0, 1.0)
-
+        # x_base = x_param #.clamp(0.0, 1.0)
+        x_base = torch.sigmoid(x_param)
+        
         loss_accum = 0.0
         for _ in range(args.eot_samples):
             x_aug = eot_transform(x_base, out_size=args.in_size, args=args)  # transformed input
