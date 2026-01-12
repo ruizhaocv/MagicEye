@@ -1,3 +1,31 @@
+# New command
+
+The optimization code of input signal.
+
+```bash
+python3 optimize_input_eot.py \
+--dataset shapenet \
+--net_G resnet18fcn \
+--in_size 256 \
+--checkpoint_path ./checkpoints_0105_resnet18_bn/best_ckpt.pt \
+--init noise \
+--with_disparity_conv \
+--steps 1000 \
+--lr_img 1e-3 \
+--vis_every 100 \
+--out_dir ./input_opt_out_noise_0112_resnet18_unet256 \
+--alt_net_G unet_256 \
+--alt_in_size 256 \
+--alt_norm_type batch \
+--alt_checkpoint_path ./checkpoints_decode_sp_u256_bn_df/best_ckpt.pt \
+--alt_with_disparity_conv \
+--with_skip_connection \
+--alt_with_skip_connection \
+--eot_blur
+```
+
+
+
 # Neural Magic Eye 
 
 [Preprint](<https://arxiv.org/abs/2012.15692>) | [Project Page](<https://jiupinjia.github.io/neuralmagiceye/>)  | [Colab Runtime](<https://colab.research.google.com/drive/1f59dFLJ748i2TleE54RkbUZSMo9Hyx7l?usp=sharing>)
@@ -155,4 +183,3 @@ If you use our code for your research, please cite the following paper:
       primaryClass={cs.CV}
 }
 ``````
-
