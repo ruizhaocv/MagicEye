@@ -14,6 +14,14 @@ import torch.nn.functional as F
 # -----------------------
 # Utils
 # -----------------------
+
+def norm01_img(a):
+    mn, mx = a.min(), a.max()
+    if mx - mn < 1e-8:
+        return np.zeros_like(a)
+    return (a - mn) / (mx - mn)
+
+
 def save_vis(out_dir, step, x_img, pred, gt):
     """
     x_img: [1,3,H,W] in [0,1]
@@ -21,7 +29,13 @@ def save_vis(out_dir, step, x_img, pred, gt):
     """
     os.makedirs(out_dir, exist_ok=True)
 
-    x = x_img.detach().cpu().clamp(0, 1)[0].permute(1, 2, 0).numpy()  # HWC
+    # x = x_img.detach().cpu().clamp(0, 1)[0].permute(1, 2, 0).numpy()  # HWC
+    # x = x_img.detach().cpu()[0].permute(1, 2, 0).numpy()  # HWC
+
+    x = norm01_img(
+        x_img.detach().cpu()[0].permute(1, 2, 0).numpy()
+    )
+
     p = pred.detach().cpu()[0, 0].numpy()
     g = gt.detach().cpu()[0, 0].numpy()
 
@@ -121,43 +135,43 @@ def eot_transform(x, out_size, args):
     B, C, H, W = x.shape
     assert H == out_size and W == out_size
 
-    # 1) additive noise
-    if args.eot_noise_std > 0:
-        x = x + args.eot_noise_std * torch.randn_like(x)
+    # # 1) additive noise
+    # if args.eot_noise_std > 0:
+    #     x = x + args.eot_noise_std * torch.randn_like(x)
 
-    # 2) brightness/contrast jitter (differentiable)
-    if args.eot_brightness > 0:
-        b = (torch.rand(B, 1, 1, 1, device=x.device) * 2 - 1) * args.eot_brightness
-        x = x + b
-    if args.eot_contrast > 0:
-        c = 1.0 + (torch.rand(B, 1, 1, 1, device=x.device) * 2 - 1) * args.eot_contrast
-        mean = x.mean(dim=(2, 3), keepdim=True)
-        x = (x - mean) * c + mean
+    # # 2) brightness/contrast jitter (differentiable)
+    # if args.eot_brightness > 0:
+    #     b = (torch.rand(B, 1, 1, 1, device=x.device) * 2 - 1) * args.eot_brightness
+    #     x = x + b
+    # if args.eot_contrast > 0:
+    #     c = 1.0 + (torch.rand(B, 1, 1, 1, device=x.device) * 2 - 1) * args.eot_contrast
+    #     mean = x.mean(dim=(2, 3), keepdim=True)
+    #     x = (x - mean) * c + mean
 
-    # clamp after photometric
-    x = x.clamp(0.0, 1.0)
+    # # clamp after photometric
+    # x = x.clamp(0.0, 1.0)
 
-    # 3) random scale then resize back
-    if args.eot_scale > 0:
-        s = 1.0 + (torch.rand(1, device=x.device) * 2 - 1) * args.eot_scale
-        new_size = int(round(out_size * float(s.item())))
-        new_size = max(8, new_size)
+    # # 3) random scale then resize back
+    # if args.eot_scale > 0:
+    #     s = 1.0 + (torch.rand(1, device=x.device) * 2 - 1) * args.eot_scale
+    #     new_size = int(round(out_size * float(s.item())))
+    #     new_size = max(8, new_size)
 
-        x_scaled = F.interpolate(x, size=(new_size, new_size), mode="bilinear", align_corners=False)
+    #     x_scaled = F.interpolate(x, size=(new_size, new_size), mode="bilinear", align_corners=False)
 
-        # center crop or pad back to out_size (differentiable)
-        if new_size > out_size:
-            # crop
-            start = (new_size - out_size) // 2
-            x = x_scaled[:, :, start:start+out_size, start:start+out_size]
-        elif new_size < out_size:
-            # pad
-            pad_total = out_size - new_size
-            pad_left = pad_total // 2
-            pad_right = pad_total - pad_left
-            x = F.pad(x_scaled, (pad_left, pad_right, pad_left, pad_right), mode="reflect")
-        else:
-            x = x_scaled
+    #     # center crop or pad back to out_size (differentiable)
+    #     if new_size > out_size:
+    #         # crop
+    #         start = (new_size - out_size) // 2
+    #         x = x_scaled[:, :, start:start+out_size, start:start+out_size]
+    #     elif new_size < out_size:
+    #         # pad
+    #         pad_total = out_size - new_size
+    #         pad_left = pad_total // 2
+    #         pad_right = pad_total - pad_left
+    #         x = F.pad(x_scaled, (pad_left, pad_right, pad_left, pad_right), mode="reflect")
+    #     else:
+    #         x = x_scaled
 
     # 4) random integer shift using roll (differentiable)
     if args.eot_shift > 0:
@@ -167,9 +181,9 @@ def eot_transform(x, out_size, args):
 
     # 5) optional blur
     if args.eot_blur:
-        x = gaussian_blur_2d(x, sigma=1.0, kernel_size=5)
+        x = gaussian_blur_2d(x, sigma=5, kernel_size=11)
 
-    return x.clamp(0.0, 1.0)
+    return x #.clamp(0.0, 1.0)
 
 
 # -----------------------
@@ -217,12 +231,12 @@ def main():
     parser.add_argument("--alt_with_disparity_conv", action="store_true", default=False)
     parser.add_argument("--alt_with_skip_connection", action="store_true", default=False)
 
-    parser.add_argument("--eot_samples", type=int, default=4, help="number of random transforms per step")
+    parser.add_argument("--eot_samples", type=int, default=1, help="number of random transforms per step")
     parser.add_argument("--eot_noise_std", type=float, default=0.01, help="std of additive gaussian noise")
     parser.add_argument("--eot_brightness", type=float, default=0.05, help="brightness jitter strength")
     parser.add_argument("--eot_contrast", type=float, default=0.05, help="contrast jitter strength")
     parser.add_argument("--eot_scale", type=float, default=0.10, help="random scale jitter in [1-s, 1+s]")
-    parser.add_argument("--eot_shift", type=int, default=4, help="random pixel shift (roll) up to +/- this value")
+    parser.add_argument("--eot_shift", type=int, default=20, help="random pixel shift (roll) up to +/- this value")
     parser.add_argument("--eot_blur", action="store_true", default=False, help="enable small gaussian blur")
 
 
@@ -274,7 +288,7 @@ def main():
     if args.init == "gt":
         x_param = gt_stereo.clone().detach()
     else:
-        x_param = torch.rand_like(gt_stereo)
+        x_param = torch.randn_like(gt_stereo)
 
     # 关键：learnable tensor
     x_param = torch.nn.Parameter(x_param)
@@ -306,7 +320,7 @@ def main():
         opt.zero_grad(set_to_none=True)
 
         # base input (learnable), keep it in a reasonable range for stability
-        x_base = x_param.clamp(0.0, 1.0)
+        x_base = x_param #.clamp(0.0, 1.0)
 
         loss_accum = 0.0
         for _ in range(args.eot_samples):
@@ -330,7 +344,7 @@ def main():
 
         if step % args.vis_every == 0 or step == args.steps:
             with torch.no_grad():
-                x_vis = x_param.clamp(0.0, 1.0)
+                x_vis = x_aug #.clamp(0.0, 1.0)
                 pred_main = net_G(x_vis)
 
                 # main visualization (keep your old one if you like)
