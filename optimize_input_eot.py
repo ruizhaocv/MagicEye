@@ -188,14 +188,14 @@ def eot_transform(x, out_size, args):
     #         x = x_scaled
 
     # 4) random integer shift using roll (differentiable)
-    if args.eot_shift > 0:
-        dx = int(torch.randint(-args.eot_shift, args.eot_shift + 1, (1,), device=x.device).item())
-        dy = int(torch.randint(-args.eot_shift, args.eot_shift + 1, (1,), device=x.device).item())
-        x = torch.roll(x, shifts=(dy, dx), dims=(2, 3))
+    # if args.eot_shift > 0:
+    #     dx = int(torch.randint(-args.eot_shift, args.eot_shift + 1, (1,), device=x.device).item())
+    #     dy = int(torch.randint(-args.eot_shift, args.eot_shift + 1, (1,), device=x.device).item())
+    #     x = torch.roll(x, shifts=(dy, dx), dims=(2, 3))
 
     # 5) optional blur
     if args.eot_blur:
-        x = gaussian_blur_2d(x, sigma=5, kernel_size=11)
+        x = gaussian_blur_2d(x, sigma=3, kernel_size=5)
 
     return x.clamp(0.0, 1.0)
 
